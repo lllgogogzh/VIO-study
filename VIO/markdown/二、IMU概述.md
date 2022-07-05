@@ -270,3 +270,44 @@ $$
 
 #### iv. 推导
 
+### 七、优化问题中残差的构建以及雅可比矩阵的求解
+
+#### i. 视觉重投影残差
+
+​	对于第i帧中的特征点，投影到第j帧相机坐标系下的值为：
+$$
+x_j=T_{ji}x_i=T_{jw}T_{wi}x_i
+$$
+其中，Tji为两相邻帧间的相对位姿。这只是简易表示方法。**在VIO中，我们要考虑相机与imu之间的外参。**因此，我们重新构建上述表达式：
+$$
+\begin{bmatrix}
+x_{c_j}\\y_{c_j}\\z_{c_j}\\1
+\end{bmatrix}=T_{cb}T_{b_jw}T_{wb_i}T_{bc}
+\begin{bmatrix}
+x_{c_i}\\y_{c_i}\\z_{c_i}\\1
+\end{bmatrix}
+$$
+再把相机内参加入公式：
+$$
+\begin{bmatrix}
+u\\v\\1
+\end{bmatrix}=
+{\lambda}K\begin{bmatrix}
+x_{c_i}\\y_{c_i}\\z_{c_i}
+\end{bmatrix}
+$$
+
+#### ii. IMU预积分残差
+
+
+
+
+
+
+
+
+
+
+
+
+
