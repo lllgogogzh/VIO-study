@@ -342,7 +342,7 @@ if(ESTIMATE_EXTRINSIC == 2)
 
 #### iv. 初始化+滑动窗口优化
 
-​	VINS中的状态估计器，用视觉特征点跟踪得到的位姿作为后续优化初始值。这里与ORBSLAM不同之处在于，**ORBSLAM利用PnP等手段估计出当前帧初始位姿后，使用local map进一步搜索与当前帧中匹配的点，再进行BA优化，其是就是利用视觉重投影误差优化；而VINS中，误差函数包括视觉重投影误差+IMU预积分误差。**
+​	VINS中的状态估计器，用视觉特征点跟踪得到的位姿作为后续优化初始值。这里与ORBSLAM不同之处在于，**ORBSLAM利用PnP等手段估计出当前帧初始位姿后，使用local map进一步搜索与当前帧中匹配的点，再进行BA优化，其是就是利用视觉重投影误差优化；而VINS中，误差函数包括视觉重投影误差+IMU预积分误差。**其中，视觉重投影误差，跟踪特征点使用的方法是光流法。
 
 初始化部分这里先不介绍，在之后文档中介绍。这里就看一下有关滑动窗口优化的部分：
 
@@ -392,21 +392,172 @@ else
 
 ### 4、滑动窗口优化(重点)(未完成)
 
+参考：https://blog.csdn.net/huanghaihui_123/article/details/87361621
+
+1. para_Pose[i]：滑动窗口内11帧的位姿，6自由度7变量表示 SIZE_POSE: 7
+2. para_SpeedBias[i]：滑动窗口11帧对应的速度,ba,bg,9自由度。SIZE_SPEEDBIAS: 9
+3. para_Ex_Pose[i]: 相机到IMU的外参变换矩阵，6自由度7变量表示 SIZE_POSE: 7
+4. para_Td[0]: 滑窗内第一个时刻的相机到IMU的时钟差
+
+#### i. 创建ceres::problem
+
+```c++
+TicToc t_whole, t_prepare;
+vector2double();
+
+ceres::Problem problem;
+ceres::LossFunction *loss_function;
+//loss_function = NULL;
+loss_function = new ceres::HuberLoss(1.0);
+//loss_function = new ceres::CauchyLoss(1.0 / FOCAL_LENGTH);
+//ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0);
+```
+
+#### ii. 添加优化变量
+
+参考：https://blog.csdn.net/qq_42700518/article/details/105898222
+
+添加待优化的变量，包括维数、初始值。
+
+```c++
+for (int i = 0; i < frame_count + 1; i++)
+{
+    ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
+    problem.AddParameterBlock(para_Pose[i], SIZE_POSE, local_parameterization);//SIZE_POSE = 7 平移+四元数
+    if(USE_IMU)
+        problem.AddParameterBlock(para_SpeedBias[i], SIZE_SPEEDBIAS);//包括速度speed 和 两个bias
+}
+if(!USE_IMU)
+    problem.SetParameterBlockConstant(para_Pose[0]);//如果设定为不用IMU，则锁定优化变量
+```
+
+#### iii. 是否优化外参
+
+```c++
+for (int i = 0; i < NUM_OF_CAM; i++)
+{
+    //如果双目就是优化两个相机外参
+    //单目就是优化一个相机外参
+    ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
+    problem.AddParameterBlock(para_Ex_Pose[i], SIZE_POSE, local_parameterization);
+    if ((ESTIMATE_EXTRINSIC && frame_count == WINDOW_SIZE && Vs[0].norm() > 0.2) || openExEstimation)
+    {
+        //ROS_INFO("estimate extinsic param");
+        openExEstimation = 1;
+    }
+    else
+    {
+        //ROS_INFO("fix extinsic param");
+        problem.SetParameterBlockConstant(para_Ex_Pose[i]);
+    }
+}
+problem.AddParameterBlock(para_Td[0], 1);//添加时空标定参数
+
+if (!ESTIMATE_TD || Vs[0].norm() < 0.2)
+    problem.SetParameterBlockConstant(para_Td[0]);//不优化时间差
+```
+
+#### iv. 添加残差项
+
+**1)、边缘化的残差项：**直观上，我们认为，滑窗在滑动的过程中，因为要丢弃一些过去的帧，但是过去帧留有一些有效的信息。因此我们在现在姿态估计的过程中，还是需要考虑之前丢弃的帧的一些约束条件。观察变量由：last_marginalization_info提供。
+
+```c++
+if (last_marginalization_info && last_marginalization_info->valid)
+{
+    // construct new marginlization_factor
+    MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
+    problem.AddResidualBlock(marginalization_factor, NULL,
+                             last_marginalization_parameter_blocks);
+}
+```
+
+**2)、预积分的残差项：**预积分的计算式可以在`imu_factor.h`中看到，预积分的测量在`VINS-IMU预积分.md`文件中介绍了。这里，误差就是计算值和测量值的差值。
+
+即在
+ para_Pose[i]，para_SpeedBias[i]
+ para_Pose[j]，para_SpeedBias[j]
+ 这四个变量是正确的情况下，推算出来的pre_integration真值与实际的测量值之间的偏差。
+
+```c++
+if(USE_IMU)
+{
+    for (int i = 0; i < frame_count; i++)
+    {
+        int j = i + 1;
+        if (pre_integrations[j]->sum_dt > 10.0)
+            continue;
+        IMUFactor* imu_factor = new IMUFactor(pre_integrations[j]);
+        problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
+    }
+}
+```
+
+**3)、视觉的残差项：**以三角化的特征点一个个进行添加残差。具体过程，假设第l个特征点（在代码中用feature_index表示），第一次被第i帧图像观察到（代码中用imu_i表示），那个这个特征点在第j帧图像中（代码中用imu_j表示）的残差,即
+para_Pose[imu_i]，para_SpeedBias[imu_i]
+para_Pose[imu_j]，para_SpeedBias[imu_j]
+para_Ex_Pose[0]
+para_Td[0]
+para_Feature[feature_index]
+这些都是真值的情况下，可以解算出：
+pts_i pts_j (代表这个l特征点在i,j帧坐标系下的空间位置)
+it_per_id.feature_per_frame[0].velocity,
+it_per_id.feature_per_frame[0].cur_td, （it_per_id指的是第一次这个特征点被观测到对应的帧）
+it_per_frame.velocity,
+it_per_frame.cur_td（it_per_frame指的是这个特征点要计算残差的那帧）
 
 
 
+**同样地，具体计算误差以及雅可比的方式在`projectionOneFrameTwoCameraFactor`等文件中可以找到。**
 
+```c++
+for (auto &it_per_id : f_manager.feature)
+{
+    it_per_id.used_num = it_per_id.feature_per_frame.size();
+    if (it_per_id.used_num < 4)
+        continue;
 
+    ++feature_index;
 
+    int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
 
+    Vector3d pts_i = it_per_id.feature_per_frame[0].point;
 
+    for (auto &it_per_frame : it_per_id.feature_per_frame)
+    {
+        imu_j++;
+        if (imu_i != imu_j)
+        {
+            Vector3d pts_j = it_per_frame.point;
+            ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
+                                                                                      it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+            problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
+        }
 
+        if(STEREO && it_per_frame.is_stereo)
+        {                
+            Vector3d pts_j_right = it_per_frame.pointRight;
+            if(imu_i != imu_j)
+            {
+                ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
+                                                                                       it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+                problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]);
+            }
+            else
+            {
+                ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
+                                                                                       it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+                problem.AddResidualBlock(f, loss_function, para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]);
+            }
 
+        }
+        f_m_cnt++;
+    }
+}
+```
 
+#### v. 进行优化
 
-
-
-
+#### vi. 滑动窗口边缘化(等理论通透之后再看代码)
 
 
 
