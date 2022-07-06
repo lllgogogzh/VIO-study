@@ -195,11 +195,13 @@ https://blog.csdn.net/jdy_lyy/article/details/119258236
 
 ## VI. Tightly Coupled Monocular VIO 紧耦合的单目VIO
 
-|      |      |
-| ---- | ---- |
-|      |      |
-|      |      |
-|      |      |
+| words                | translation |
+| -------------------- | ----------- |
+| omnidirectional      | 全向的      |
+| intrinsic parameters | 内在参数    |
+|                      |             |
+|                      |             |
+|                      |             |
 
 ​	完成初始化后，我们给出一个基于滑动窗口的紧耦合VIO，有高精度和鲁棒性的状态估计。如图5所示
 
@@ -234,6 +236,14 @@ https://blog.csdn.net/jdy_lyy/article/details/119258236
 ### C. Visual Measurement Residual 视觉测量残差构建
 
 ​	相比于针孔相机模型，我们给出了更广泛的残差定义方式。
+
+​	考虑第l个特征在第i帧图像中被观测到，那么其在第j帧图像中投影的残差定义为：
+
+![6](6.png)
+
+​	其中，uci,vci是第l个特征在第i帧中的观测位置(像素坐标)；ucj,vcj是同一个特征在第j帧中的观测。π c −1是相机逆投影关系，把相机坐标系搞到像素坐标系(就像是针孔相机的内参)。
+
+
 
 ### D. Marginalization 边缘化
 
