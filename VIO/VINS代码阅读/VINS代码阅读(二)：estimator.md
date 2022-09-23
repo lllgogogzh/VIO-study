@@ -1,8 +1,14 @@
 # VINS代码阅读(二)：estimator
 
+https://blog.csdn.net/xiaojinger_123/article/details/119246379
+
 ## 一、概述
 
 ​	这里主要是状态估计器的代码。
+
+![1](1.png)
+
+
 
 ## 二、IMU数据入口 imputIMU函数
 
@@ -557,7 +563,40 @@ for (auto &it_per_id : f_manager.feature)
 
 #### v. 进行优化
 
-#### vi. 滑动窗口边缘化(等理论通透之后再看代码)
+```c++
+ceres::Solver::Options options;
+
+options.linear_solver_type = ceres::DENSE_SCHUR;
+//options.num_threads = 2;
+options.trust_region_strategy_type = ceres::DOGLEG;
+options.max_num_iterations = NUM_ITERATIONS;
+//options.use_explicit_schur_complement = true;
+//options.minimizer_progress_to_stdout = true;
+//options.use_nonmonotonic_steps = true;
+if (marginalization_flag == MARGIN_OLD)
+    options.max_solver_time_in_seconds = SOLVER_TIME * 4.0 / 5.0;
+else
+    options.max_solver_time_in_seconds = SOLVER_TIME;
+TicToc t_solver;
+ceres::Solver::Summary summary;
+ceres::Solve(options, &problem, &summary);
+//cout << summary.BriefReport() << endl;
+ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
+//printf("solver costs: %f \n", t_solver.toc());
+
+double2vector();
+//printf("frame_count: %d \n", frame_count);
+```
+
+​	接着solve()非线性优化求解，接着double2vector()把ceres求解出来的结果附加到滑窗内的变量中去。接着开始边缘化，分两种情况：边缘化倒数第二新的帧还是边缘化最旧的帧。
+
+    vector2double()
+    ----> 把现在滑窗里面的未经过非线性化的原数数据（初始值预设值），转化为非线性优化参数para_**。
+    double2vector()
+    ----> 把非线性优化参数para_**转化为现在滑窗里面的数据。
+
+
+#### vi. 滑动窗口边缘化(看完理论之后再看代码)
 
 
 
