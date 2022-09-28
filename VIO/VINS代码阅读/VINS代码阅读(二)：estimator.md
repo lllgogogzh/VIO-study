@@ -12,6 +12,10 @@ https://blog.csdn.net/xiaojinger_123/article/details/119246379
 
 ## 二、IMU数据入口 imputIMU函数
 
+​	此函数在主函数`rosNodeTest.cpp`中的IMU回调函数中调用。话题每接收到一个IMU数据，则进入一次此函数。
+
+​	此函数中，根据IMU数据快速预测当前PVQ。并且将加速度和角速度信息压入整体vector(list)。
+
 ```c++
 void Estimator::inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity)
 {
@@ -66,6 +70,10 @@ void Estimator::fastPredictIMU(double t, Eigen::Vector3d linear_acceleration, Ei
 ```
 
 ## 三、图片入口函数 imputImage
+
+​	每当话题接收到图像时，进入此函数。此函数负责跟踪特征点，来获取视觉残差。在函数`trackImage`函数中，对特征点进行跟踪。
+
+​	得到跟踪后的特征点后，进入processMeasurements()函数处理测量信息，计算残差，更新信息矩阵，再进行非线性优化。
 
 ```c++
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
@@ -287,11 +295,11 @@ void Estimator::processIMU(double t, double dt, const Vector3d &linear_accelerat
 
 ### 3、处理图像特征(未完成)
 
-#### i. 概述(未完成)
+#### i. 概述
 
 ```c++
-//
-//
+//主要进行状态估计（非线性优化）
+//这也符论文中的原理：每到新的图像帧来后，使用非线性优化方法估计机器人当前位姿。
 void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const double header)
 ```
 
@@ -598,7 +606,7 @@ double2vector();
 
 #### vi. 滑动窗口边缘化(看完理论之后再看代码)
 
-
+参考：https://blog.csdn.net/xiaojinger_123/article/details/119542568
 
 
 
