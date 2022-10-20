@@ -4,6 +4,24 @@
 
 # IMU预积分详细过程
 
+## 零、整体说明
+
+​	预积分的意义：在优化过程中，**每次迭代都会更新优化变量的值**，比如PVQ，第一次迭代后，**状态变量PVQ会改变**。变化后，**根据公式，我们需要重新求残差，再进行下一次迭代**。而残差是通过积分得来的，可想而知，这非常耗时。
+
+​	因此，**预积分需要将计算残差的过程中的状态变量分离出去**。
+
+#### 分离旋转变量：
+
+​	一开始的积分中是需要当前位姿R的。**我们乘Rbkw（bk帧到世界坐标系的变换）**，就把其中的当前位姿全转化为相对bk帧的位姿了。而这个相对位姿一直由角速度积分得到，是可求的。因此对于PV两个量，IMU预积分值值与不同时刻的a测量值有关。
+
+#### 分离bias：
+
+​	由于bias也是我们的优化变量，但是bias在积分中很难分离出去，因此我们采取**线性化**的方法。**先只考虑上一时刻已知的bias，一直用这个值计算预积分**。**由于真正的bias在迭代中被优化了，这对计算新残差(新预积分量)的过程有影响**，我们不想重新积分，**于是假设新预积分量与bias成线性关系**（f(b+db)=f(b)+Jb*db）。这个bias微小增量定义为：**上一次迭代优化值-上一时刻的状态变量**。这样，每次迭代变化的bias，不积分算残差，用这种方法再更新残差，近似认为是用积分算得的残差。而雅可比矩阵是估计协方差和均值过程中计算的(F)。
+
+​	代码在下面，可以参考。
+
+![8](img/8.png)	
+
 ## 一、理论过程
 
 ### 1.1 PVQ连续值积分
@@ -63,6 +81,40 @@ $$
 
 **这里，得到新的bias后，直接可以根据雅可比矩阵求出新的预积分，之后进行下一次迭代。**
 
+```c++
+Eigen::Matrix<double, 15, 1> evaluate(const Eigen::Vector3d &Pi, const Eigen::Quaterniond &Qi, const Eigen::Vector3d &Vi, const Eigen::Vector3d &Bai, const Eigen::Vector3d &Bgi,
+                                      const Eigen::Vector3d &Pj, const Eigen::Quaterniond &Qj, const Eigen::Vector3d &Vj, const Eigen::Vector3d &Baj, const Eigen::Vector3d &Bgj)
+{
+    //Bai与Baj都是优化中迭代出来的bias值
+    //delta_p v q都是优化初始值
+    Eigen::Matrix<double, 15, 1> residuals;
+
+    Eigen::Matrix3d dp_dba = jacobian.block<3, 3>(O_P, O_BA);
+    Eigen::Matrix3d dp_dbg = jacobian.block<3, 3>(O_P, O_BG);
+
+    Eigen::Matrix3d dq_dbg = jacobian.block<3, 3>(O_R, O_BG);
+
+    Eigen::Matrix3d dv_dba = jacobian.block<3, 3>(O_V, O_BA);
+    Eigen::Matrix3d dv_dbg = jacobian.block<3, 3>(O_V, O_BG);
+	//linearized_ba 优化初始bias值，这里作差就是微小变化量(优化过程中，为了避免积分，不用新的bias去计算预积分，只做修正)
+    //修正就认为是用真实迭代出的bias去计算预积分残差了
+    //delta_p v q都是优化初始值，所以这里用Bai-bias优化初始值作为bias的增量
+    Eigen::Vector3d dba = Bai - linearized_ba;
+    Eigen::Vector3d dbg = Bgi - linearized_bg;
+
+    Eigen::Quaterniond corrected_delta_q = delta_q * Utility::deltaQ(dq_dbg * dbg);
+    Eigen::Vector3d corrected_delta_v = delta_v + dv_dba * dba + dv_dbg * dbg;
+    Eigen::Vector3d corrected_delta_p = delta_p + dp_dba * dba + dp_dbg * dbg;
+
+    residuals.block<3, 1>(O_P, 0) = Qi.inverse() * (0.5 * G * sum_dt * sum_dt + Pj - Pi - Vi * sum_dt) - corrected_delta_p;
+    residuals.block<3, 1>(O_R, 0) = 2 * (corrected_delta_q.inverse() * (Qi.inverse() * Qj)).vec();
+    residuals.block<3, 1>(O_V, 0) = Qi.inverse() * (G * sum_dt + Vj - Vi) - corrected_delta_v;
+    residuals.block<3, 1>(O_BA, 0) = Baj - Bai;//bias残差
+    residuals.block<3, 1>(O_BG, 0) = Bgj - Bgi;
+    return residuals;
+}
+```
+
 ### 1.4 两帧之间PVQ增量(预积分)的离散形式
 
 中值法，i时刻测量和i+1时刻测量已知，求预积分：
@@ -73,11 +125,46 @@ $$
 
 ​	这与 Estimator::processIMU()函数中的 IntegrationBase::push_back()上是一致的。**注意这里跟公式(2)是不一样的,这里积分出来的是前后两帧之间的 IMU 增量信息,而公式(2)给出的当前帧时刻的物理量信息。**
 
-*手动推导一下：*
+```c++
+Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba);
+Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
+result_delta_q = delta_q * Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2);
+Vector3d un_acc_1 = result_delta_q * (_acc_1 - linearized_ba);
+Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
+result_delta_p = delta_p + delta_v * _dt + 0.5 * un_acc * _dt * _dt;
+result_delta_v = delta_v + un_acc * _dt;
+result_linearized_ba = linearized_ba;
+result_linearized_bg = linearized_bg;         
+```
 
+### 1.5 一些说明
 
+​	PVQ积分，是通过IMU的测量值，积分出当前PVQ。举个简单例子：二维环境，质点加速度已知，初速度以及初始位置已知，那么质点每时刻的速度位置都可以通过积分计算得来：
+$$
+x=x_0+v_0t+\frac{1}{2}at^2\\
+v=v_0+at\\
+x=x_0+\int vdt=x_0+\int_{t\in[i,j]}v_0dt+\int\int adt^2=x_0+v_0t+\alpha\\
+v=v_0+\int_{t\in[i,j]} adt=v_0+\beta
+$$
+​	我们可以看出，上式子中的alpha和beta就是积分量，这个积分量可以认为是增量，也是通过IMU测量得出的。我们简单描述为：
 
-### 1.5 连续形式下PVQ增量的误差、协方差以及Jacobian
+```mermaid
+graph LR;
+A[IMU测量值]-->B[机器人当前PVQ位姿]
+C[PVQ积分增量]
+A-->C
+C-->B
+```
+
+**为了方便积分，程序中不直接通过IMU测量值直接估计机器人当前PVQ位姿，而是对一段时间内的测量值预积分PVQ增量，再估计得到机器人当前PVQ位姿。**
+
+​	再类比一下，两帧间相对位姿可以类比为PVQ增量；绝对位姿类比为机器人当前PVQ位姿。
+
+​	对1.6章节的说明：**由于IMU单次测量存在误差，那么积分出的量也有误差。同理，协方差也有。协方差表示了这段测量量的相关程度(可信度)**。由于当前状态总与上一时刻状态相关(上一时刻+增量)，那么我们就需要预测其均值与协方差。
+
+​	*补充：通过一组数据计算出方差和均值，则可代表这个随机变量。*
+
+### 1.6 连续形式下PVQ增量的误差、协方差以及Jacobian
 
 ​	**IMU在每一个时刻积分出来的值是有误差的**，因此我们需要对误差进行分析，在t时刻误差项的导数为：（这里的delta表示两帧间时间段的预积分量）
 
@@ -85,11 +172,11 @@ $$
 $$
 \delta \dot z_t^{bk}=F_t\delta z_t^{b_k}+G_tn_t
 $$
-对时间t求导，随时间的变量有每个状态变量和每个时刻的误差。**我们现在计算第t+deltat时刻的预积分量预t时刻预积分量的关系：**
+对时间t求导，随时间的变量有每个状态变量和每个时刻的误差。**我们现在计算第t+deltat时刻的预积分量与t时刻预积分量的关系：**
 
 ![12](img/12.png)
 
-**上式给出了如EKF一样对非线性系统线形化的过程，意义：表示下一时刻的IMU测量误差与上一个时刻的成线性关系。这样，我们可以根据当前的值预测出下一个时刻的均值和协方差。**
+**上式给出了如EKF一样对非线性系统线性化的过程，意义：表示下一时刻的IMU测量误差与上一个时刻的成线性关系。这样，我们可以根据当前的值预测出下一个时刻的均值和协方差。**
 
 ​	公式(11)表示均值预测，协方差预测公式如下：
 
@@ -101,13 +188,71 @@ $$
 
 *和卡尔曼滤波中的状态量的预测方程很类似*
 
-### 1.6 离散形式的PVQ增量误差分析
+### 1.7 离散形式的PVQ增量误差分析
 
 ![15](img/15.png)
 
 推导：？？？？？？？？？？？？？？？？？？？？？？？？？
 
-### 1.7 离散形式的PVQ增量误差的Jacobian和协方差
+对应代码：
+
+```c++
+Vector3d w_x = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
+Vector3d a_0_x = _acc_0 - linearized_ba;
+Vector3d a_1_x = _acc_1 - linearized_ba;
+Matrix3d R_w_x, R_a_0_x, R_a_1_x;
+
+R_w_x<<0, -w_x(2), w_x(1),
+w_x(2), 0, -w_x(0),
+-w_x(1), w_x(0), 0;
+R_a_0_x<<0, -a_0_x(2), a_0_x(1),
+a_0_x(2), 0, -a_0_x(0),
+-a_0_x(1), a_0_x(0), 0;
+R_a_1_x<<0, -a_1_x(2), a_1_x(1),
+a_1_x(2), 0, -a_1_x(0),
+-a_1_x(1), a_1_x(0), 0;
+
+MatrixXd F = MatrixXd::Zero(15, 15);
+F.block<3, 3>(0, 0) = Matrix3d::Identity();
+F.block<3, 3>(0, 3) = -0.25 * delta_q.toRotationMatrix() * R_a_0_x * _dt * _dt + 
+    -0.25 * result_delta_q.toRotationMatrix() * R_a_1_x * (Matrix3d::Identity() - R_w_x * _dt) * _dt * _dt;
+F.block<3, 3>(0, 6) = MatrixXd::Identity(3,3) * _dt;
+F.block<3, 3>(0, 9) = -0.25 * (delta_q.toRotationMatrix() + result_delta_q.toRotationMatrix()) * _dt * _dt;
+F.block<3, 3>(0, 12) = -0.25 * result_delta_q.toRotationMatrix() * R_a_1_x * _dt * _dt * -_dt;
+F.block<3, 3>(3, 3) = Matrix3d::Identity() - R_w_x * _dt;
+F.block<3, 3>(3, 12) = -1.0 * MatrixXd::Identity(3,3) * _dt;
+F.block<3, 3>(6, 3) = -0.5 * delta_q.toRotationMatrix() * R_a_0_x * _dt + 
+    -0.5 * result_delta_q.toRotationMatrix() * R_a_1_x * (Matrix3d::Identity() - R_w_x * _dt) * _dt;
+F.block<3, 3>(6, 6) = Matrix3d::Identity();
+F.block<3, 3>(6, 9) = -0.5 * (delta_q.toRotationMatrix() + result_delta_q.toRotationMatrix()) * _dt;
+F.block<3, 3>(6, 12) = -0.5 * result_delta_q.toRotationMatrix() * R_a_1_x * _dt * -_dt;
+F.block<3, 3>(9, 9) = Matrix3d::Identity();
+F.block<3, 3>(12, 12) = Matrix3d::Identity();
+//cout<<"A"<<endl<<A<<endl;
+
+MatrixXd V = MatrixXd::Zero(15,18);
+V.block<3, 3>(0, 0) =  0.25 * delta_q.toRotationMatrix() * _dt * _dt;
+V.block<3, 3>(0, 3) =  0.25 * -result_delta_q.toRotationMatrix() * R_a_1_x  * _dt * _dt * 0.5 * _dt;
+V.block<3, 3>(0, 6) =  0.25 * result_delta_q.toRotationMatrix() * _dt * _dt;
+V.block<3, 3>(0, 9) =  V.block<3, 3>(0, 3);
+V.block<3, 3>(3, 3) =  0.5 * MatrixXd::Identity(3,3) * _dt;
+V.block<3, 3>(3, 9) =  0.5 * MatrixXd::Identity(3,3) * _dt;
+V.block<3, 3>(6, 0) =  0.5 * delta_q.toRotationMatrix() * _dt;
+V.block<3, 3>(6, 3) =  0.5 * -result_delta_q.toRotationMatrix() * R_a_1_x  * _dt * 0.5 * _dt;
+V.block<3, 3>(6, 6) =  0.5 * result_delta_q.toRotationMatrix() * _dt;
+V.block<3, 3>(6, 9) =  V.block<3, 3>(6, 3);
+V.block<3, 3>(9, 12) = MatrixXd::Identity(3,3) * _dt;
+V.block<3, 3>(12, 15) = MatrixXd::Identity(3,3) * _dt;
+
+//step_jacobian = F;
+//step_V = V;
+jacobian = F * jacobian;
+covariance = F * covariance * F.transpose() + V * noise * V.transpose();
+```
+
+
+
+### 1.8 离散形式的PVQ增量误差的Jacobian和协方差
 
 ![16](img/16.png)
 
