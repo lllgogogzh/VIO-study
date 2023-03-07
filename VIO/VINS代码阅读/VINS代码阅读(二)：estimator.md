@@ -14,6 +14,10 @@ https://blog.csdn.net/xiaojinger_123/article/details/119246379
 
 
 
+![3](3.png)
+
+
+
 ## 二、IMU数据入口 imputIMU函数
 
 ​	此函数在主函数`rosNodeTest.cpp`中的IMU回调函数中调用。话题每接收到一个IMU数据，则进入一次此函数。
@@ -129,6 +133,10 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 
 ​	取出对应的图像和IMU数据后，对IMU进行预积分，再处理图像信息(特征点信息)，最后进行滑动窗口优化。
 
+![4](4.png)
+
+
+
 ```c++
 void Estimator::processMeasurements()
 {
@@ -209,6 +217,10 @@ void Estimator::processMeasurements()
 ### 1、获取IMU信息函数 getIMUInterval()
 
 参数：t0 之前时间；t1 现在时间；accVector要获取的加速度；gyrVector要获取的角速度。
+
+![5](5.png)
+
+
 
 ```c++
 bool Estimator::getIMUInterval(double t0, double t1, vector<pair<double, Eigen::Vector3d>> &accVector, 
