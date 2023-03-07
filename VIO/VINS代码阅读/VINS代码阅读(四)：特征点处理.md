@@ -4,13 +4,23 @@
 
 # VINS代码阅读(四)：特征点处理
 
+feature_manager参考：https://blog.csdn.net/shyjhyp11/article/details/125389607
+
+feature_tracker参考：https://zhuanlan.zhihu.com/p/555270835
+
 ## 一、概述
 
 ​	这部分代码主要用于处理图像、特征提取、特征点匹配跟踪等操作。
 
-## 二、FeatureTracker类：特征点跟踪
+### 1.1 特征点跟踪
 
-https://zhuanlan.zhihu.com/p/555270835
+​	主要在FeatureTracker中，功能是当前帧中跟踪之前的特征点，返回当前帧中跟踪成功的特征点。
+
+### 1.2 所有特征的管理
+
+（给出三个类的关系即可）
+
+## 二、FeatureTracker类：特征点跟踪
 
 主要功能为特征点跟踪。
 
@@ -470,7 +480,7 @@ class FeaturePerFrame
 };
 ```
 
-## 四、FeaturePerId类：每个图像
+## 四、FeaturePerId类：观察到特征点的图像帧
 
 ​	这个类中包含了一幅图像中的所有特征点。
 
@@ -542,11 +552,251 @@ class FeatureManager
 
 
 
-### 4.1 
+### 5.1 判断关键帧
+
+#### 5.1.1 流程
+
+1. **遍历当前帧所有特征点**
+
+   ![]()
+
+2. **统计跟踪成功的特征点**
+
+3. **计算视差**
+
+   ![]()
 
 
 
 
+
+#### 5.1.2 代码详细说明
+
+```c++
+bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
+{
+    ROS_DEBUG("input feature: %d", (int)image.size());
+    ROS_DEBUG("num of feature: %d", getFeatureCount());
+    double parallax_sum = 0; //所有特征点视差总和
+    int parallax_num = 0;
+    last_track_num = 0;		//跟踪到的个数
+    last_average_parallax = 0;	
+    new_feature_num = 0;
+    long_track_num = 0;
+    for (auto &id_pts : image)
+    {
+        //f_per_fra 每个特征点
+        FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
+        assert(id_pts.second[0].first == 0);
+        //有关双目相机的处理
+        if(id_pts.second.size() == 2)
+        {
+            f_per_fra.rightObservation(id_pts.second[1].second);
+            assert(id_pts.second[1].first == 1);
+        }
+		
+        //特征点id序号
+        int feature_id = id_pts.first;
+        //这个特征在总特征中出现过 那么我们得到it
+        auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
+                          {
+            return it.feature_id == feature_id;
+                          });
+		
+        //没找到it，那么向总特征中加入这个特征，初始观测到这个特征的帧为：frame_count
+        if (it == feature.end())
+        {
+            feature.push_back(FeaturePerId(feature_id, frame_count));
+            feature.back().feature_per_frame.push_back(f_per_fra);
+            new_feature_num++;
+        }
+        //找到了it，那么说明这个特征点是成功跟踪的
+        //则把这个特征继续压入在该图像帧中的信息(xyz,uv,vx,vy)
+        else if (it->feature_id == feature_id)
+        {
+            it->feature_per_frame.push_back(f_per_fra);
+            last_track_num++;
+            if( it-> feature_per_frame.size() >= 4)
+                long_track_num++;
+        }
+    }
+
+    //若图像数小于2 是关键帧
+    //若跟踪成功特征点数小于20 是关键帧
+    //若多次跟踪成功的点(跟踪成功4次)小于40 是关键帧
+    //若新特征比跟踪成功的点的一半要多(意味着新特征很多) 是关键帧
+    if (frame_count < 2 || last_track_num < 20 || long_track_num < 40 || new_feature_num > 0.5 * last_track_num)
+        return true;
+	
+    //计算视差：当前与次帧 以及当前与次次帧的视差
+    for (auto &it_per_id : feature)
+    {
+        if (it_per_id.start_frame <= frame_count - 2 &&
+            it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1)
+        {
+            parallax_sum += compensatedParallax2(it_per_id, frame_count);
+            parallax_num++;
+        }
+    }
+	
+    //如果第一帧图像，是关键帧
+    if (parallax_num == 0)
+    {
+        return true;
+    }
+    else
+    {
+        //如果视差大于某阈值，是关键帧
+        ROS_DEBUG("parallax_sum: %lf, parallax_num: %d", parallax_sum, parallax_num);
+        ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
+        last_average_parallax = parallax_sum / parallax_num * FOCAL_LENGTH;
+        return parallax_sum / parallax_num >= MIN_PARALLAX;
+    }
+}
+```
+
+
+
+### 5.2 初始化（未完成）
+
+
+
+### 5.3 三角化（未完成）
+
+
+
+```c++
+void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
+{
+    for (auto &it_per_id : feature)
+    {
+        if (it_per_id.estimated_depth > 0)
+            continue;
+
+        if(STEREO && it_per_id.feature_per_frame[0].is_stereo)
+        {
+            int imu_i = it_per_id.start_frame;
+            Eigen::Matrix<double, 3, 4> leftPose;
+            Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
+            Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
+            leftPose.leftCols<3>() = R0.transpose();
+            leftPose.rightCols<1>() = -R0.transpose() * t0;
+            //cout << "left pose " << leftPose << endl;
+
+            Eigen::Matrix<double, 3, 4> rightPose;
+            Eigen::Vector3d t1 = Ps[imu_i] + Rs[imu_i] * tic[1];
+            Eigen::Matrix3d R1 = Rs[imu_i] * ric[1];
+            rightPose.leftCols<3>() = R1.transpose();
+            rightPose.rightCols<1>() = -R1.transpose() * t1;
+            //cout << "right pose " << rightPose << endl;
+
+            Eigen::Vector2d point0, point1;
+            Eigen::Vector3d point3d;
+            point0 = it_per_id.feature_per_frame[0].point.head(2);
+            point1 = it_per_id.feature_per_frame[0].pointRight.head(2);
+            //cout << "point0 " << point0.transpose() << endl;
+            //cout << "point1 " << point1.transpose() << endl;
+
+            triangulatePoint(leftPose, rightPose, point0, point1, point3d);
+            Eigen::Vector3d localPoint;
+            localPoint = leftPose.leftCols<3>() * point3d + leftPose.rightCols<1>();
+            double depth = localPoint.z();
+            if (depth > 0)
+                it_per_id.estimated_depth = depth;
+            else
+                it_per_id.estimated_depth = INIT_DEPTH;
+            /*
+            Vector3d ptsGt = pts_gt[it_per_id.feature_id];
+            printf("stereo %d pts: %f %f %f gt: %f %f %f \n",it_per_id.feature_id, point3d.x(), point3d.y(), point3d.z(),
+                                                            ptsGt.x(), ptsGt.y(), ptsGt.z());
+            */
+            continue;
+        }
+        else if(it_per_id.feature_per_frame.size() > 1)
+        {
+            int imu_i = it_per_id.start_frame;
+            Eigen::Matrix<double, 3, 4> leftPose;
+            Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
+            Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
+            leftPose.leftCols<3>() = R0.transpose();
+            leftPose.rightCols<1>() = -R0.transpose() * t0;
+
+            imu_i++;
+            Eigen::Matrix<double, 3, 4> rightPose;
+            Eigen::Vector3d t1 = Ps[imu_i] + Rs[imu_i] * tic[0];
+            Eigen::Matrix3d R1 = Rs[imu_i] * ric[0];
+            rightPose.leftCols<3>() = R1.transpose();
+            rightPose.rightCols<1>() = -R1.transpose() * t1;
+
+            Eigen::Vector2d point0, point1;
+            Eigen::Vector3d point3d;
+            point0 = it_per_id.feature_per_frame[0].point.head(2);
+            point1 = it_per_id.feature_per_frame[1].point.head(2);
+            triangulatePoint(leftPose, rightPose, point0, point1, point3d);
+            Eigen::Vector3d localPoint;
+            localPoint = leftPose.leftCols<3>() * point3d + leftPose.rightCols<1>();
+            double depth = localPoint.z();
+            if (depth > 0)
+                it_per_id.estimated_depth = depth;
+            else
+                it_per_id.estimated_depth = INIT_DEPTH;
+            /*
+            Vector3d ptsGt = pts_gt[it_per_id.feature_id];
+            printf("motion  %d pts: %f %f %f gt: %f %f %f \n",it_per_id.feature_id, point3d.x(), point3d.y(), point3d.z(),
+                                                            ptsGt.x(), ptsGt.y(), ptsGt.z());
+            */
+            continue;
+        }
+        it_per_id.used_num = it_per_id.feature_per_frame.size();
+        if (it_per_id.used_num < 4)
+            continue;
+
+        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+
+        Eigen::MatrixXd svd_A(2 * it_per_id.feature_per_frame.size(), 4);
+        int svd_idx = 0;
+
+        Eigen::Matrix<double, 3, 4> P0;
+        Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
+        Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
+        P0.leftCols<3>() = Eigen::Matrix3d::Identity();
+        P0.rightCols<1>() = Eigen::Vector3d::Zero();
+
+        for (auto &it_per_frame : it_per_id.feature_per_frame)
+        {
+            imu_j++;
+
+            Eigen::Vector3d t1 = Ps[imu_j] + Rs[imu_j] * tic[0];
+            Eigen::Matrix3d R1 = Rs[imu_j] * ric[0];
+            Eigen::Vector3d t = R0.transpose() * (t1 - t0);
+            Eigen::Matrix3d R = R0.transpose() * R1;
+            Eigen::Matrix<double, 3, 4> P;
+            P.leftCols<3>() = R.transpose();
+            P.rightCols<1>() = -R.transpose() * t;
+            Eigen::Vector3d f = it_per_frame.point.normalized();
+            svd_A.row(svd_idx++) = f[0] * P.row(2) - f[2] * P.row(0);
+            svd_A.row(svd_idx++) = f[1] * P.row(2) - f[2] * P.row(1);
+
+            if (imu_i == imu_j)
+                continue;
+        }
+        ROS_ASSERT(svd_idx == svd_A.rows());
+        Eigen::Vector4d svd_V = Eigen::JacobiSVD<Eigen::MatrixXd>(svd_A, Eigen::ComputeThinV).matrixV().rightCols<1>();
+        double svd_method = svd_V[2] / svd_V[3];
+        //it_per_id->estimated_depth = -b / A;
+        //it_per_id->estimated_depth = svd_V[2] / svd_V[3];
+
+        it_per_id.estimated_depth = svd_method;
+        //it_per_id->estimated_depth = INIT_DEPTH;
+
+        if (it_per_id.estimated_depth < 0.1)
+        {
+            it_per_id.estimated_depth = INIT_DEPTH;
+        }
+
+    }
+}
+```
 
 
 

@@ -309,7 +309,7 @@ void Estimator::processIMU(double t, double dt, const Vector3d &linear_accelerat
 }
 ```
 
-### 3、处理图像特征(未完成)
+### 3、处理图像特征
 
 #### i. 概述
 
