@@ -20,6 +20,14 @@ feature_tracker参考：https://zhuanlan.zhihu.com/p/555270835
 
 （给出三个类的关系即可）
 
+![3](3.jpeg)
+
+
+
+### 1.3 特征点处理总流程
+
+![]()
+
 ## 二、FeatureTracker类：特征点跟踪
 
 主要功能为特征点跟踪。
@@ -661,9 +669,13 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
 
 
 
-### 5.3 三角化（未完成）
+### 5.3 三角化
+
+#### 5.3.1 理论
 
 
+
+#### 5.3.2 代码
 
 ```c++
 void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
@@ -675,6 +687,7 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
 
         if(STEREO && it_per_id.feature_per_frame[0].is_stereo)
         {
+            //双目
             int imu_i = it_per_id.start_frame;
             Eigen::Matrix<double, 3, 4> leftPose;
             Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
@@ -714,6 +727,7 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         }
         else if(it_per_id.feature_per_frame.size() > 1)
         {
+            //单目
             int imu_i = it_per_id.start_frame;
             Eigen::Matrix<double, 3, 4> leftPose;
             Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
@@ -800,7 +814,26 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
 
 
 
+#### 5.3.3 理论求解代码
 
+```c++
+void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
+                        Eigen::Vector2d &point0, Eigen::Vector2d &point1, Eigen::Vector3d &point_3d)
+{
+    Eigen::Matrix4d design_matrix = Eigen::Matrix4d::Zero();
+    design_matrix.row(0) = point0[0] * Pose0.row(2) - Pose0.row(0);
+    design_matrix.row(1) = point0[1] * Pose0.row(2) - Pose0.row(1);
+    design_matrix.row(2) = point1[0] * Pose1.row(2) - Pose1.row(0);
+    design_matrix.row(3) = point1[1] * Pose1.row(2) - Pose1.row(1);
+    Eigen::Vector4d triangulated_point;
+    triangulated_point =
+              design_matrix.jacobiSvd(Eigen::ComputeFullV).matrixV().rightCols<1>();
+    point_3d(0) = triangulated_point(0) / triangulated_point(3);
+    point_3d(1) = triangulated_point(1) / triangulated_point(3);
+    point_3d(2) = triangulated_point(2) / triangulated_point(3);
+}
+
+```
 
 
 
