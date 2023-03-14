@@ -667,7 +667,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
 
 ### 5.2 初始化（未完成）
 
-
+​	详见*VINS代码阅读(五)：初始化*
 
 ### 5.3 三角化
 
